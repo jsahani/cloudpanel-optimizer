@@ -16,11 +16,11 @@ Auto-detects hardware, calculates optimal values, applies safe configurations �
 
 ## The Problem
 
-A fresh CloudPanel VPS ships with conservative defaults designed for shared hosting — not for running production SaaS applications. On a 48GB / 12-core server, you'll typically see:
+A fresh CloudPanel VPS ships with conservative defaults designed for shared hosting — not for running production SaaS applications. Regardless of your server size, you'll typically see:
 
 - **MySQL buffer pool** using only a fraction of available RAM
 - **PHP-FPM pools** set to `ondemand` with cold-start delays
-- **PHP memory_limit** at 768M per process (wastefully high)
+- **PHP memory_limit** set too high per process (wastefully reserving RAM)
 - **No OPcache tuning** — recompiling PHP on every request
 - **Redis** running without memory limits
 - **Kernel** using default TCP and file descriptor settings
@@ -29,7 +29,7 @@ The result? TTFB of 1.5–3+ seconds, high CPU usage on MySQL, and a server that
 
 ## The Solution
 
-This script auto-detects your server specs and calculates optimal values — no manual tuning required.
+This script auto-detects your server specs and calculates optimal values — no manual tuning required. Works on any VPS size from 2GB to 128GB+.
 
 ```bash
 sudo bash cloudpanel-optimize.sh
@@ -53,7 +53,7 @@ That's it. One command optimizes MySQL, PHP (all versions), PHP-FPM pools, Redis
 - Slow query logging enabled
 
 ### PHP Global (all versions)
-- `memory_limit` right-sized (512M for ≥32GB servers)
+- `memory_limit` right-sized (256M default, 512M for ≥32GB servers)
 - `max_execution_time` = 120s
 - Upload limits = 64M
 - `max_input_vars` = 5000
@@ -63,7 +63,7 @@ That's it. One command optimizes MySQL, PHP (all versions), PHP-FPM pools, Redis
 
 ### PHP-FPM Pools
 - Switched from `ondemand` → `dynamic`
-- `max_children` calculated per pool
+- `max_children` calculated per pool based on available RAM
 - 20% warm `start_servers` (no cold starts)
 - `listen.backlog` = 65535
 - `rlimit_files` = 131072
@@ -94,7 +94,6 @@ That's it. One command optimizes MySQL, PHP (all versions), PHP-FPM pools, Redis
 |--------|--------|-------|:-----------:|
 | TTFB | 1.5 – 3.0s | 0.15 – 0.7s | **~85%** |
 | MySQL CPU | 40 – 90% | 5 – 15% | **~80%** |
-| Free RAM (48GB server) | 2 – 4 GB | 8 – 12 GB | **~3x** |
 | PHP cold start delay | 1 – 3s | Eliminated | **100%** |
 | PHP processes per site | 250+ (uncontrolled) | 20 – 150 (tuned) | **Controlled** |
 
@@ -182,7 +181,7 @@ sudo bash cloudpanel-optimize.sh --rollback /root/cp-backup-20260228-112931
 
 ## 🧮 How Values Are Calculated
 
-All values are derived from your actual hardware specs — no hardcoded magic numbers.
+All values are derived from your actual hardware specs — no hardcoded magic numbers. The script automatically scales to any server size.
 
 ```
 MySQL buffer pool     = RAM × 20%
@@ -199,13 +198,29 @@ FPM max_spare         = max_children × 40%
 Redis maxmemory       = RAM × 10% (max 4GB)
 ```
 
-### Example: 48GB RAM / 12 Cores / 6 Sites
+### Example Profiles (auto-calculated)
 
+**Small VPS — 4GB RAM / 2 Cores / 3 Sites:**
+```
+MySQL buffer pool    : 512M (1 instance)
+MySQL max connections: 256
+FPM max_children     : 20 per pool
+Redis maxmemory      : 409mb
+```
+
+**Medium VPS — 16GB RAM / 4 Cores / 4 Sites:**
+```
+MySQL buffer pool    : 3G (3 instances)
+MySQL max connections: 256
+FPM max_children     : 40 per pool
+Redis maxmemory      : 1638mb
+```
+
+**Large VPS — 48GB RAM / 12 Cores / 6 Sites:**
 ```
 MySQL buffer pool    : 9G (9 instances)
 MySQL max connections: 600
 FPM max_children     : 80 per pool
-FPM start_servers    : 16
 Redis maxmemory      : 4096mb
 ```
 
@@ -238,6 +253,7 @@ REDIS_PASSWORD=<your-password>
 
 - **OS:** Ubuntu 22.04 / 24.04 (or any Debian-based distro)
 - **Panel:** CloudPanel 2.x
+- **RAM:** 2GB minimum (recommended 4GB+)
 - **PHP:** 8.0+ (lower versions are auto-skipped)
 - **Access:** Root (`sudo`)
 - **Disk:** SSD recommended (I/O settings are SSD-optimized)
