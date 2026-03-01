@@ -54,11 +54,11 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 # --- Helpers ---
-log_info()   { echo -e "  ${BLUE}\u25b8${NC} $1"; }
-log_ok()     { echo -e "  ${GREEN}\u2714${NC} $1"; }
-log_warn()   { echo -e "  ${YELLOW}\u26a0${NC} $1"; }
-log_err()    { echo -e "  ${RED}\u2716${NC} $1"; }
-log_header() { echo -e "\n${CYAN}${BOLD}\u2500\u2500 $1 \u2500\u2500${NC}\n"; }
+log_info()   { echo -e "  ${BLUE}▸${NC} $1"; }
+log_ok()     { echo -e "  ${GREEN}✔${NC} $1"; }
+log_warn()   { echo -e "  ${YELLOW}⚠${NC} $1"; }
+log_err()    { echo -e "  ${RED}✖${NC} $1"; }
+log_header() { echo -e "\n${CYAN}${BOLD}── $1 ──${NC}\n"; }
 log_step()   { echo -e "\n${GREEN}${BOLD}[$1/$TOTAL_STEPS] $2${NC}\n"; }
 
 # ============================================================================
@@ -89,6 +89,7 @@ detect_all_php_versions() {
         if [[ -d "$d" ]]; then
             local ver
             ver=$(basename "$d")
+            # Skip anything below PHP 8.0
             local major
             major=$(echo "$ver" | cut -d. -f1)
             if [[ "$major" -lt 8 ]]; then
@@ -130,6 +131,7 @@ detect_mysql_config() {
     log_info "MySQL config: ${MYSQL_CNF}"
 }
 
+# Scan ALL PHP version directories for website pools
 scan_all_pools() {
     POOL_COUNT=0
     ALL_POOL_FILES=()
@@ -145,14 +147,16 @@ scan_all_pools() {
             if [[ ! -f "$f" ]]; then continue; fi
             local fname
             fname=$(basename "$f")
+            # Skip system pools
             case "$fname" in
                 default*|global*|www.conf) continue ;;
             esac
             ALL_POOL_FILES+=("$f")
             POOL_COUNT=$((POOL_COUNT + 1))
 
+            # Track which PHP versions have site pools (deduplicated)
             case "$versions_seen" in
-                *"|${ver}|"*) ;;
+                *"|${ver}|"*) ;;  # already seen
                 *)
                     PHP_VERSIONS_WITH_POOLS+=("$ver")
                     versions_seen="${versions_seen}|${ver}|"
@@ -165,7 +169,7 @@ scan_all_pools() {
     if [[ $POOL_COUNT -gt 0 ]]; then
         for pf in "${ALL_POOL_FILES[@]}"; do
             local rel_path="${pf#/etc/php/}"
-            log_info "  \u2192 PHP ${rel_path}"
+            log_info "  → PHP ${rel_path}"
         done
         log_info "PHP versions with sites: ${PHP_VERSIONS_WITH_POOLS[*]}"
     fi
@@ -185,6 +189,7 @@ detect_server_profile() {
 
     local RAM_GB=$((TOTAL_RAM_MB / 1024))
 
+    # --- MySQL Buffer Pool: 20% of RAM ---
     MYSQL_BUFFER_POOL_MB=$((TOTAL_RAM_MB * 20 / 100))
     MYSQL_BUFFER_POOL_MB=$(( (MYSQL_BUFFER_POOL_MB + 255) / 512 * 512 ))
     if [[ $MYSQL_BUFFER_POOL_MB -lt 512 ]]; then MYSQL_BUFFER_POOL_MB=512; fi
@@ -199,6 +204,7 @@ detect_server_profile() {
     if [[ $MYSQL_BUFFER_INSTANCES -lt 1 ]]; then MYSQL_BUFFER_INSTANCES=1; fi
     if [[ $MYSQL_BUFFER_INSTANCES -gt 16 ]]; then MYSQL_BUFFER_INSTANCES=16; fi
 
+    # --- MySQL Connections ---
     MYSQL_MAX_CONNECTIONS=$((CPU_CORES * 50))
     if [[ $MYSQL_MAX_CONNECTIONS -lt 256 ]]; then MYSQL_MAX_CONNECTIONS=256; fi
     if [[ $MYSQL_MAX_CONNECTIONS -gt 1024 ]]; then MYSQL_MAX_CONNECTIONS=1024; fi
@@ -206,8 +212,10 @@ detect_server_profile() {
     MYSQL_TABLE_OPEN_CACHE=$((MYSQL_MAX_CONNECTIONS * 4))
     if [[ $MYSQL_TABLE_OPEN_CACHE -gt 4096 ]]; then MYSQL_TABLE_OPEN_CACHE=4096; fi
 
+    # --- PHP Memory ---
     if [[ $RAM_GB -ge 32 ]]; then PHP_MEMORY_LIMIT="512M"; fi
 
+    # --- PHP-FPM Pools ---
     local SITES=$POOL_COUNT
     if [[ $SITES -lt 1 ]]; then SITES=6; fi
 
@@ -225,6 +233,7 @@ detect_server_profile() {
     FPM_MAX_SPARE=$((FPM_MAX_CHILDREN * 40 / 100))
     if [[ $FPM_MAX_SPARE -lt $FPM_START_SERVERS ]]; then FPM_MAX_SPARE=$FPM_START_SERVERS; fi
 
+    # --- Redis ---
     if command -v redis-server &>/dev/null; then
         local REDIS_MB=$((TOTAL_RAM_MB * 10 / 100))
         if [[ $REDIS_MB -lt 128 ]]; then REDIS_MB=128; fi
@@ -232,26 +241,27 @@ detect_server_profile() {
         REDIS_MAXMEMORY="${REDIS_MB}mb"
     fi
 
+    # --- Print profile ---
     local SITES_DISPLAY=$POOL_COUNT
     if [[ $SITES_DISPLAY -lt 1 ]]; then SITES_DISPLAY=6; fi
 
     echo ""
     echo -e "  ${BOLD}Computed Optimization Profile:${NC}"
-    echo -e "  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510"
-    echo -e "  \u2502 MySQL buffer pool    : ${YELLOW}${MYSQL_BUFFER_POOL}${NC} (${MYSQL_BUFFER_INSTANCES} instances)"
-    echo -e "  \u2502 MySQL max connections: ${YELLOW}${MYSQL_MAX_CONNECTIONS}${NC}"
-    echo -e "  \u2502 MySQL table cache    : ${YELLOW}${MYSQL_TABLE_OPEN_CACHE}${NC}"
-    echo -e "  \u2502 PHP memory_limit     : ${YELLOW}${PHP_MEMORY_LIMIT}${NC} (all versions)"
-    echo -e "  \u2502 FPM max_children     : ${YELLOW}${FPM_MAX_CHILDREN}${NC} per pool"
-    echo -e "  \u2502 FPM start_servers    : ${YELLOW}${FPM_START_SERVERS}${NC}"
-    echo -e "  \u2502 FPM min/max spare    : ${YELLOW}${FPM_MIN_SPARE} / ${FPM_MAX_SPARE}${NC}"
-    echo -e "  \u2502 FPM idle timeout     : ${YELLOW}${FPM_IDLE_TIMEOUT}${NC}"
-    echo -e "  \u2502 FPM max requests     : ${YELLOW}${FPM_MAX_REQUESTS}${NC}"
+    echo -e "  ┌─────────────────────────────────────────────────┐"
+    echo -e "  │ MySQL buffer pool    : ${YELLOW}${MYSQL_BUFFER_POOL}${NC} (${MYSQL_BUFFER_INSTANCES} instances)"
+    echo -e "  │ MySQL max connections: ${YELLOW}${MYSQL_MAX_CONNECTIONS}${NC}"
+    echo -e "  │ MySQL table cache    : ${YELLOW}${MYSQL_TABLE_OPEN_CACHE}${NC}"
+    echo -e "  │ PHP memory_limit     : ${YELLOW}${PHP_MEMORY_LIMIT}${NC} (all versions)"
+    echo -e "  │ FPM max_children     : ${YELLOW}${FPM_MAX_CHILDREN}${NC} per pool"
+    echo -e "  │ FPM start_servers    : ${YELLOW}${FPM_START_SERVERS}${NC}"
+    echo -e "  │ FPM min/max spare    : ${YELLOW}${FPM_MIN_SPARE} / ${FPM_MAX_SPARE}${NC}"
+    echo -e "  │ FPM idle timeout     : ${YELLOW}${FPM_IDLE_TIMEOUT}${NC}"
+    echo -e "  │ FPM max requests     : ${YELLOW}${FPM_MAX_REQUESTS}${NC}"
     if [[ -n "$REDIS_MAXMEMORY" ]]; then
-        echo -e "  \u2502 Redis maxmemory      : ${YELLOW}${REDIS_MAXMEMORY}${NC}"
+        echo -e "  │ Redis maxmemory      : ${YELLOW}${REDIS_MAXMEMORY}${NC}"
     fi
-    echo -e "  \u2502 Target pools         : ${YELLOW}${POOL_COUNT} found / ~${SITES_DISPLAY} estimated${NC}"
-    echo -e "  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"
+    echo -e "  │ Target pools         : ${YELLOW}${POOL_COUNT} found / ~${SITES_DISPLAY} estimated${NC}"
+    echo -e "  └─────────────────────────────────────────────────┘"
     echo ""
 }
 
@@ -268,7 +278,7 @@ create_backups() {
     cp -r /etc/mysql/ "$BACKUP_DIR/mysql/" 2>/dev/null && log_ok "MySQL configs" || log_warn "MySQL config copy issue"
     cp -r /etc/php/ "$BACKUP_DIR/php/" 2>/dev/null && log_ok "PHP configs (all versions)" || log_warn "PHP config copy issue"
 
-    # Nginx -- backup main config and conf.d
+    # Nginx — backup main config and conf.d
     if [[ -f /etc/nginx/nginx.conf ]]; then
         cp /etc/nginx/nginx.conf "$BACKUP_DIR/nginx/" 2>/dev/null
         if [[ -d /etc/nginx/conf.d/ ]]; then
@@ -315,6 +325,19 @@ create_backups() {
 
     log_ok "System snapshot saved"
     log_ok "Backup dir: ${YELLOW}${BACKUP_DIR}${NC}"
+
+    # Auto-cleanup: keep only the 3 most recent backups
+    local MAX_BACKUPS=3
+    local old_backups
+    old_backups=$(ls -dt /root/cp-backup-* 2>/dev/null | tail -n +$((MAX_BACKUPS + 1))) || true
+    if [[ -n "$old_backups" ]]; then
+        local count=0
+        while IFS= read -r old_dir; do
+            rm -rf "$old_dir"
+            count=$((count + 1))
+        done <<< "$old_backups"
+        log_ok "Cleaned up ${count} old backup(s) (keeping latest ${MAX_BACKUPS})"
+    fi
 }
 
 # ============================================================================
@@ -411,6 +434,7 @@ optimize_php_global() {
             continue
         fi
 
+        # Check if already optimized
         if grep -q "CP-OPTIMIZED OPcache" "$PHP_INI" 2>/dev/null; then
             log_info "PHP ${ver}: already optimized, skipping"
             continue
@@ -420,10 +444,11 @@ optimize_php_global() {
         CURRENT=$(grep -E "^memory_limit\s*=" "$PHP_INI" 2>/dev/null | head -1 | awk -F= '{print $2}' | tr -d ' ') || true
 
         if [[ "$DRY_RUN" == true ]]; then
-            log_info "[DRY RUN] PHP ${ver}: memory_limit ${CURRENT:-not set} \u2192 ${PHP_MEMORY_LIMIT}, + OPcache"
+            log_info "[DRY RUN] PHP ${ver}: memory_limit ${CURRENT:-not set} → ${PHP_MEMORY_LIMIT}, + OPcache"
             continue
         fi
 
+        # Apply optimizations
         sed -i "s/^memory_limit\s*=.*/memory_limit = ${PHP_MEMORY_LIMIT}/" "$PHP_INI"
         sed -i 's/^max_execution_time\s*=.*/max_execution_time = 120/' "$PHP_INI"
         sed -i 's/^max_input_time\s*=.*/max_input_time = 120/' "$PHP_INI"
@@ -436,6 +461,7 @@ optimize_php_global() {
             echo "max_input_vars = 5000" >> "$PHP_INI"
         fi
 
+        # OPcache
         cat >> "$PHP_INI" <<'OPCACHE'
 
 ; CP-OPTIMIZED OPcache
@@ -453,6 +479,7 @@ OPCACHE
         log_ok "PHP ${ver}: memory=${PHP_MEMORY_LIMIT}, OPcache configured"
     done
 
+    # Restart all active PHP-FPM services
     if [[ "$DRY_RUN" != true ]]; then
         for ver in "${ALL_PHP_VERSIONS[@]}"; do
             if systemctl is-active --quiet "php${ver}-fpm" 2>/dev/null; then
@@ -480,13 +507,14 @@ optimize_php_pools() {
     if [[ ${#ALL_POOL_FILES[@]} -eq 0 ]]; then
         log_warn "No website pools found in any PHP version."
         log_info "Add your apps in CloudPanel first, then re-run this script."
-        log_info "MySQL, PHP global, Redis, Nginx & sysctl optimizations are already applied."
+        log_info "MySQL, PHP global, Redis & sysctl optimizations are already applied."
         return
     fi
 
     log_info "Optimizing ${#ALL_POOL_FILES[@]} pool(s) across ${#PHP_VERSIONS_WITH_POOLS[@]} PHP version(s)"
     log_info "Settings: max_children=${FPM_MAX_CHILDREN} per pool"
 
+    # Helper: update existing key or append new line
     update_or_add() {
         local key="$1" value="$2" file="$3"
         if grep -q "^${key}\s*=" "$file" 2>/dev/null; then
@@ -496,12 +524,14 @@ optimize_php_pools() {
         fi
     }
 
+    # Track which PHP versions we modified (for restart)
     local modified_versions=""
 
     for POOL_FILE in "${ALL_POOL_FILES[@]}"; do
         local POOL_NAME
         POOL_NAME=$(basename "$POOL_FILE" .conf)
 
+        # Extract PHP version from path: /etc/php/8.3/fpm/pool.d/xxx.conf → 8.3
         local PHP_VER
         PHP_VER=$(echo "$POOL_FILE" | sed 's|/etc/php/||;s|/fpm/pool.d/.*||')
 
@@ -511,13 +541,15 @@ optimize_php_pools() {
         fi
 
         if grep -q "; CP-OPTIMIZED\|# CP-OPTIMIZED" "$POOL_FILE" 2>/dev/null; then
-            log_warn "${POOL_NAME} (PHP ${PHP_VER}) -- already optimized, skipping"
+            log_warn "${POOL_NAME} (PHP ${PHP_VER}) — already optimized, skipping"
             continue
         fi
 
+        # Switch to dynamic process management
         sed -i 's/^pm\s*=\s*ondemand/pm = dynamic/' "$POOL_FILE"
         sed -i 's/^pm\s*=\s*static/pm = dynamic/' "$POOL_FILE"
 
+        # Core pool tuning
         update_or_add "pm.max_children"          "$FPM_MAX_CHILDREN"  "$POOL_FILE"
         update_or_add "pm.start_servers"          "$FPM_START_SERVERS" "$POOL_FILE"
         update_or_add "pm.min_spare_servers"      "$FPM_MIN_SPARE"    "$POOL_FILE"
@@ -526,10 +558,12 @@ optimize_php_pools() {
         update_or_add "pm.max_requests"           "$FPM_MAX_REQUESTS" "$POOL_FILE"
         update_or_add "request_terminate_timeout"  "300s"             "$POOL_FILE"
 
+        # Advanced settings from TVA guide
         update_or_add "listen.backlog"            "65535"             "$POOL_FILE"
         update_or_add "rlimit_files"              "131072"            "$POOL_FILE"
         update_or_add "catch_workers_output"      "yes"              "$POOL_FILE"
 
+        # Per-pool OPcache
         if ! grep -q "opcache.enable" "$POOL_FILE" 2>/dev/null; then
             cat >> "$POOL_FILE" <<'POOLOPCACHE'
 
@@ -543,6 +577,7 @@ php_admin_value[opcache.revalidate_freq] = 60
 POOLOPCACHE
         fi
 
+        # Per-pool memory limit
         if grep -q "php_admin_value\[memory_limit\]" "$POOL_FILE" 2>/dev/null; then
             sed -i "s|php_admin_value\[memory_limit\].*|php_admin_value[memory_limit] = ${PHP_MEMORY_LIMIT}|" "$POOL_FILE"
         else
@@ -552,15 +587,18 @@ POOLOPCACHE
         echo "" >> "$POOL_FILE"
         echo "; CP-OPTIMIZED $(date +%Y-%m-%d)" >> "$POOL_FILE"
 
-        log_ok "${POOL_NAME} (PHP ${PHP_VER}) -- optimized"
+        log_ok "${POOL_NAME} (PHP ${PHP_VER}) — optimized"
 
+        # Track this version for restart
         case "$modified_versions" in
             *"|${PHP_VER}|"*) ;;
             *) modified_versions="${modified_versions}|${PHP_VER}|" ;;
         esac
     done
 
+    # Restart only the PHP-FPM versions we actually modified
     if [[ "$DRY_RUN" != true ]]; then
+        # Brief pause to ensure file writes are flushed
         sleep 1
 
         for ver in "${PHP_VERSIONS_WITH_POOLS[@]}"; do
@@ -596,7 +634,7 @@ optimize_redis() {
     log_step 5 "Redis Optimization"
 
     if ! command -v redis-server &>/dev/null; then
-        log_warn "Redis not installed -- skipping"
+        log_warn "Redis not installed — skipping"
         return
     fi
 
@@ -609,7 +647,7 @@ optimize_redis() {
     done
 
     if [[ -z "$REDIS_CONF" ]]; then
-        log_warn "Redis config not found -- skipping"
+        log_warn "Redis config not found — skipping"
         return
     fi
 
@@ -754,7 +792,7 @@ LIMITS
 # ============================================================================
 # NOTE: This ONLY modifies /etc/nginx/nginx.conf (main/events context) and
 # creates /etc/nginx/conf.d/cloudpanel-optimize.conf (http context).
-# It NEVER touches /etc/nginx/sites-enabled/* -- those are managed by CloudPanel.
+# It NEVER touches /etc/nginx/sites-enabled/* — those are managed by CloudPanel.
 # ============================================================================
 
 optimize_nginx() {
@@ -764,7 +802,7 @@ optimize_nginx() {
     local NGINX_OPT_CONF="/etc/nginx/conf.d/cloudpanel-optimize.conf"
 
     if [[ ! -f "$NGINX_CONF" ]]; then
-        log_warn "Nginx config not found at $NGINX_CONF -- skipping"
+        log_warn "Nginx config not found at $NGINX_CONF — skipping"
         return
     fi
 
@@ -780,8 +818,8 @@ optimize_nginx() {
 
     if [[ "$DRY_RUN" == true ]]; then
         log_info "[DRY RUN] Would update nginx.conf:"
-        log_info "  worker_rlimit_nofile -> $WORKER_RLIMIT"
-        log_info "  worker_connections   -> $WORKER_CONNECTIONS"
+        log_info "  worker_rlimit_nofile → $WORKER_RLIMIT"
+        log_info "  worker_connections   → $WORKER_CONNECTIONS"
         log_info "[DRY RUN] Would create $NGINX_OPT_CONF with:"
         log_info "  Gzip compression (60-80% smaller responses)"
         log_info "  Keepalive optimization"
@@ -801,12 +839,13 @@ optimize_nginx() {
         current_rlimit=$(grep "^worker_rlimit_nofile" "$NGINX_CONF" | awk '{print $2}' | tr -dc '0-9')
         if [[ -n "$current_rlimit" ]] && [[ "$current_rlimit" -lt "$WORKER_RLIMIT" ]]; then
             sed -i "s/^worker_rlimit_nofile.*/worker_rlimit_nofile ${WORKER_RLIMIT};/" "$NGINX_CONF"
-            log_ok "worker_rlimit_nofile: ${current_rlimit} -> ${WORKER_RLIMIT}"
+            log_ok "worker_rlimit_nofile: ${current_rlimit} → ${WORKER_RLIMIT}"
             nginx_modified=true
         else
             log_info "worker_rlimit_nofile already >= ${WORKER_RLIMIT}"
         fi
     else
+        # Add it after worker_processes line
         sed -i "/^worker_processes/a worker_rlimit_nofile ${WORKER_RLIMIT};" "$NGINX_CONF"
         log_ok "worker_rlimit_nofile: added (${WORKER_RLIMIT})"
         nginx_modified=true
@@ -818,7 +857,7 @@ optimize_nginx() {
         current_wc=$(grep "worker_connections" "$NGINX_CONF" | awk '{print $2}' | tr -dc '0-9')
         if [[ -n "$current_wc" ]] && [[ "$current_wc" -lt "$WORKER_CONNECTIONS" ]]; then
             sed -i "s/worker_connections.*/worker_connections ${WORKER_CONNECTIONS};/" "$NGINX_CONF"
-            log_ok "worker_connections: ${current_wc} -> ${WORKER_CONNECTIONS}"
+            log_ok "worker_connections: ${current_wc} → ${WORKER_CONNECTIONS}"
             nginx_modified=true
         else
             log_info "worker_connections already >= ${WORKER_CONNECTIONS}"
@@ -836,9 +875,9 @@ optimize_nginx() {
     # This file is included via /etc/nginx/conf.d/*.conf which is inside the http {} block
 
     cat > "$NGINX_OPT_CONF" <<'NGINXOPT'
-# CP-OPTIMIZED -- Nginx global performance tuning
+# CP-OPTIMIZED — Nginx global performance tuning
 # This file is auto-included via /etc/nginx/conf.d/ (http context)
-# Safe for CloudPanel -- does NOT touch vhosts or sites-enabled
+# Safe for CloudPanel — does NOT touch vhosts or sites-enabled
 
 # --- Gzip Compression ---
 # Reduces response sizes by 60-80% for text-based content
@@ -1070,11 +1109,16 @@ show_status() {
     df -h / | awk 'NR==2 {printf "  %s used / %s total (%s available)\n", $3, $2, $4}'
     echo ""
 
-    echo -e "  ${BOLD}Available Backups:${NC}"
+    echo -e "  ${BOLD}Available Backups (max 3 retained):${NC}"
     local backups
-    backups=$(ls -dt /root/cp-backup-* 2>/dev/null | head -5) || true
+    backups=$(ls -dt /root/cp-backup-* 2>/dev/null) || true
     if [[ -n "$backups" ]]; then
-        echo "$backups"
+        echo "$backups" | head -3
+        local total
+        total=$(echo "$backups" | wc -l)
+        if [[ $total -gt 3 ]]; then
+            echo "  ... and $((total - 3)) more (will be cleaned on next run)"
+        fi
     else
         echo "  None"
     fi
@@ -1114,9 +1158,10 @@ rollback() {
         log_ok "MySQL restored"
     fi
 
-    # PHP -- restore all versions
+    # PHP — restore all versions
     if [[ -d "$RESTORE_DIR/php/php" ]]; then
         cp -r "$RESTORE_DIR/php/php/"* /etc/php/ 2>/dev/null || true
+        # Restart all active PHP-FPM services
         for ver in "${ALL_PHP_VERSIONS[@]}"; do
             if systemctl is-active --quiet "php${ver}-fpm" 2>/dev/null; then
                 systemctl restart "php${ver}-fpm" 2>/dev/null || true
@@ -1184,7 +1229,7 @@ case "${1:-}" in
         echo "    sudo bash $SCRIPT_NAME --help        This message"
         echo ""
         echo "  Scans ALL PHP versions for site pools (CloudPanel multi-PHP support)."
-        echo "  Safe to run multiple times -- completed steps auto-skip."
+        echo "  Safe to run multiple times — completed steps auto-skip."
         echo ""
         exit 0
         ;;
@@ -1193,14 +1238,14 @@ esac
 check_root
 
 echo ""
-echo -e "${GREEN}${BOLD}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557${NC}"
-echo -e "${GREEN}${BOLD}\u2551         CloudPanel Performance Optimizer v3.2                 \u2551${NC}"
-echo -e "${GREEN}${BOLD}\u2551         Backup \u2192 Detect \u2192 Optimize \u2192 Verify                  \u2551${NC}"
-echo -e "${GREEN}${BOLD}\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d${NC}"
+echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║         CloudPanel Performance Optimizer v3.2                 ║${NC}"
+echo -e "${GREEN}${BOLD}║         Backup → Detect → Optimize → Verify                  ║${NC}"
+echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 if [[ "$DRY_RUN" == true ]]; then
-    echo -e "  ${YELLOW}${BOLD}DRY RUN MODE -- no changes will be made${NC}"
+    echo -e "  ${YELLOW}${BOLD}DRY RUN MODE — no changes will be made${NC}"
     echo ""
 fi
 
