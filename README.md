@@ -132,6 +132,7 @@ That's it. One command runs all 7 optimization steps: MySQL, PHP (all versions),
 
 ```bash
 curl -O https://raw.githubusercontent.com/jsahani/cloudpanel-optimizer/main/cloudpanel-optimize.sh
+chmod +x cloudpanel-optimize.sh
 ```
 
 ### 2. Preview (Dry Run)
