@@ -275,12 +275,6 @@ All originals are backed up to `/root/cp-backup-YYYYMMDD-HHMMSS/` before modific
 
 ---
 
-## 🙏 Credits
-
-Optimization strategies based on the comprehensive guide by [TVA.sg](https://www.tva.sg/cloudpanel-performance-optimization-maximizing-hetzner-cloud-server-performance-for-lightning-fast-website-delivery/), adapted and extended for multi-app SaaS deployments with auto-detection and safety features.
-
----
-
 ## 📄 License
 
 [MIT](LICENSE) — Use it, fork it, improve it.
