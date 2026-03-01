@@ -189,6 +189,7 @@ PHP versions below 8.0 are automatically skipped.
 | Feature | Description |
 |---------|-------------|
 | **Full Backup** | Timestamped backup of all configs (MySQL, PHP, Redis, Nginx, sysctl) |
+| **Auto-Cleanup** | Only the 3 most recent backups are kept — older ones are pruned automatically on each run |
 | **Config Validation** | Tests PHP-FPM, MySQL, and Nginx configs before restarting services |
 | **Auto-Rollback** | If a service fails to start or `nginx -t` fails, configs are restored automatically |
 | **Idempotent** | Safe to run multiple times — completed steps auto-skip |
@@ -305,13 +306,7 @@ HTTP/3 is a per-site setting managed through CloudPanel's UI (not this script):
 
 **Not modified:** `/etc/nginx/sites-enabled/*` — CloudPanel vhosts are never touched.
 
-All originals are backed up to `/root/cp-backup-YYYYMMDD-HHMMSS/` before modification.
-
----
-
-## 🙏 Credits
-
-Optimization strategies based on the comprehensive guide by [TVA.sg](https://www.tva.sg/cloudpanel-performance-optimization-maximizing-hetzner-cloud-server-performance-for-lightning-fast-website-delivery/), adapted and extended for multi-app SaaS deployments with auto-detection, Nginx global tuning, and safety features.
+All originals are backed up to `/root/cp-backup-YYYYMMDD-HHMMSS/` before modification. Only the 3 most recent backups are retained.
 
 ---
 
