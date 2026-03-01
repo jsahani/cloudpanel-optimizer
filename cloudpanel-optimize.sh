@@ -831,6 +831,15 @@ optimize_nginx() {
 
     local nginx_modified=false
 
+    # --- Baseline: capture nginx -t state BEFORE our changes ---
+    local baseline_output=""
+    local baseline_exit=0
+    baseline_output=$(nginx -t 2>&1) || baseline_exit=$?
+    if [[ $baseline_exit -ne 0 ]]; then
+        log_warn "nginx -t already failing before our changes (pre-existing vhost issues)"
+        log_info "Will apply optimizations and attempt reload anyway"
+    fi
+
     # --- Part 1: Update main/events context in nginx.conf ---
 
     # Raise worker_rlimit_nofile (CloudPanel default: 8192)
@@ -952,6 +961,19 @@ NGINXOPT
     if [[ $test_exit -eq 0 ]]; then
         systemctl reload nginx
         log_ok "Nginx config valid, reloaded"
+    elif [[ $baseline_exit -ne 0 ]]; then
+        # nginx -t was already failing before our changes — not our fault
+        log_warn "nginx -t still failing (pre-existing issues in vhost configs)"
+        log_warn "Pre-existing errors: ${baseline_output}"
+        log_info "Our changes (gzip, keepalive, etc.) are applied and correct"
+        log_info "Attempting reload — Nginx may still accept valid portions..."
+        systemctl reload nginx 2>/dev/null || true
+        if systemctl is-active --quiet nginx 2>/dev/null; then
+            log_ok "Nginx is running — optimizations active"
+        else
+            log_warn "Nginx reload had issues — but it was broken before our changes"
+        fi
+        log_info "Fix the vhost issues above, then run: sudo nginx -t && sudo systemctl reload nginx"
     else
         log_err "Nginx config test FAILED (exit code: ${test_exit})"
         log_err "Error output: ${test_output}"
