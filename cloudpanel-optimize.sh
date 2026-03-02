@@ -801,6 +801,7 @@ LIMITS
 #
 # Each part is independently idempotent — safe to run multiple times. The script
 # always converges to the correct state without duplicating or skipping fixes.
+# Stale v3.2 conf.d files (with duplicate gzip) are auto-detected and replaced.
 # ============================================================================
 
 optimize_nginx() {
@@ -832,6 +833,7 @@ optimize_nginx() {
         log_info "  Open file cache (10000 entries)"
         log_info "  large_client_header_buffers"
         log_info "  send_timeout + reset_timedout_connection"
+        log_info "  (replaces stale v3.2 file if gzip duplicates detected)"
         return
     fi
 
@@ -902,7 +904,7 @@ optimize_nginx() {
                 nginx_modified=true
             else
                 log_warn "sed insert failed — adding include via append fallback"
-                # Fallback: insert before the closing brace of http block
+                # Fallback: insert after the sites-enabled include
                 sed -i '/include \/etc\/nginx\/sites-enabled/a\    include /etc/nginx/conf.d/*.conf;' "$NGINX_CONF"
                 if grep -q 'include /etc/nginx/conf.d/' "$NGINX_CONF" 2>/dev/null; then
                     log_ok "Added: include /etc/nginx/conf.d/*.conf (via fallback)"
@@ -982,15 +984,29 @@ optimize_nginx() {
     fi
 
     # =====================================================================
-    # Part 5: Create conf.d drop-in for non-duplicate additions ONLY
+    # Part 5: Create/upgrade conf.d drop-in for non-duplicate additions ONLY
     # Everything in this file is NEW — not already in CloudPanel's nginx.conf.
-    # No gzip directives here — those are tuned in-place above.
+    # No gzip/buffer directives here — those are tuned in-place above.
+    # If a stale v3.2 file exists with duplicate directives, it gets replaced.
     # =====================================================================
+    local needs_confd_write=false
+
     if [[ ! -f "$NGINX_OPT_CONF" ]]; then
+        needs_confd_write=true
+    elif grep -q "gzip\|gzip_vary\|gzip_proxied\|gzip_comp_level\|gzip_types\|brotli\|client_body_buffer\|client_header_buffer\|tcp_nodelay\|server_tokens\|keepalive_timeout" "$NGINX_OPT_CONF" 2>/dev/null; then
+        # Stale v3.2 file contains directives that duplicate nginx.conf — replace it
+        log_warn "Stale conf.d file detected (contains duplicate gzip/buffer directives from v3.2)"
+        log_info "Replacing with clean non-duplicate version..."
+        needs_confd_write=true
+        nginx_modified=true
+        rm -f "$NGINX_OPT_CONF.loaded" 2>/dev/null || true
+    fi
+
+    if [[ "$needs_confd_write" == true ]]; then
         mkdir -p /etc/nginx/conf.d
 
         cat > "$NGINX_OPT_CONF" <<'NGINXOPT'
-# CP-OPTIMIZED — Nginx performance additions
+# CP-OPTIMIZED v3.3 — Nginx performance additions
 # Non-duplicate settings only — gzip/buffers are tuned directly in nginx.conf
 # Safe for CloudPanel — does NOT touch vhosts or sites-enabled
 
@@ -1015,9 +1031,9 @@ send_timeout 30;
 reset_timedout_connection on;
 NGINXOPT
 
-        log_ok "Created $NGINX_OPT_CONF (keepalive, file cache, timeouts)"
+        log_ok "Created $NGINX_OPT_CONF (keepalive, file cache, timeouts — no duplicates)"
     else
-        log_info "$NGINX_OPT_CONF already exists — skipping creation"
+        log_info "$NGINX_OPT_CONF already clean — skipping"
     fi
 
     # Summary
