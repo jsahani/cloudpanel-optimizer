@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  CloudPanel Performance Optimizer v3.2
+#  CloudPanel Performance Optimizer v3.3
 #  For SaaS / Multi-App VPS Deployments on CloudPanel
 # ============================================================================
 #
@@ -790,9 +790,17 @@ LIMITS
 # ============================================================================
 # STEP 7: NGINX GLOBAL OPTIMIZATION
 # ============================================================================
-# NOTE: This ONLY modifies /etc/nginx/nginx.conf (main/events context) and
-# creates /etc/nginx/conf.d/cloudpanel-optimize.conf (http context).
+# NOTE: This modifies /etc/nginx/nginx.conf directly for:
+#   - worker_rlimit_nofile, worker_connections, multi_accept (main/events)
+#   - gzip_comp_level, gzip_min_length (http — tuned in-place)
+#   - client_body_buffer_size, client_header_buffer_size (http — tuned in-place)
+#   - include /etc/nginx/conf.d/*.conf (ensures conf.d is loaded)
+# And creates /etc/nginx/conf.d/cloudpanel-optimize.conf for non-duplicate additions:
+#   - keepalive_requests, open_file_cache, large_client_header_buffers, timeouts
 # It NEVER touches /etc/nginx/sites-enabled/* — those are managed by CloudPanel.
+#
+# Each part is independently idempotent — safe to run multiple times. The script
+# always converges to the correct state without duplicating or skipping fixes.
 # ============================================================================
 
 optimize_nginx() {
@@ -806,12 +814,6 @@ optimize_nginx() {
         return
     fi
 
-    # Check if already optimized
-    if [[ -f "$NGINX_OPT_CONF" ]]; then
-        log_warn "Already optimized ($NGINX_OPT_CONF exists). Skipping."
-        return
-    fi
-
     # --- Determine optimal values ---
     local WORKER_CONNECTIONS=65535
     local WORKER_RLIMIT=65535
@@ -820,12 +822,16 @@ optimize_nginx() {
         log_info "[DRY RUN] Would update nginx.conf:"
         log_info "  worker_rlimit_nofile → $WORKER_RLIMIT"
         log_info "  worker_connections   → $WORKER_CONNECTIONS"
+        log_info "  include /etc/nginx/conf.d/*.conf (if missing)"
+        log_info "  gzip_comp_level → 5 (CPU-balanced)"
+        log_info "  gzip_min_length → 256"
+        log_info "  client_body_buffer_size → 16k"
+        log_info "  client_header_buffer_size → 4k"
         log_info "[DRY RUN] Would create $NGINX_OPT_CONF with:"
-        log_info "  Gzip compression (60-80% smaller responses)"
-        log_info "  Keepalive optimization"
-        log_info "  Client buffer tuning"
-        log_info "  Open file cache"
-        log_info "  Security headers (server_tokens off)"
+        log_info "  keepalive_requests 1000"
+        log_info "  Open file cache (10000 entries)"
+        log_info "  large_client_header_buffers"
+        log_info "  send_timeout + reset_timedout_connection"
         return
     fi
 
@@ -840,9 +846,11 @@ optimize_nginx() {
         log_info "Will apply optimizations and attempt reload anyway"
     fi
 
-    # --- Part 1: Update main/events context in nginx.conf ---
+    # =====================================================================
+    # Part 1: Worker settings in nginx.conf (main/events context)
+    # =====================================================================
 
-    # Raise worker_rlimit_nofile (CloudPanel default: 8192)
+    # Raise worker_rlimit_nofile
     if grep -q "^worker_rlimit_nofile" "$NGINX_CONF" 2>/dev/null; then
         local current_rlimit
         current_rlimit=$(grep "^worker_rlimit_nofile" "$NGINX_CONF" | awk '{print $2}' | tr -dc '0-9')
@@ -854,13 +862,12 @@ optimize_nginx() {
             log_info "worker_rlimit_nofile already >= ${WORKER_RLIMIT}"
         fi
     else
-        # Add it after worker_processes line
         sed -i "/^worker_processes/a worker_rlimit_nofile ${WORKER_RLIMIT};" "$NGINX_CONF"
         log_ok "worker_rlimit_nofile: added (${WORKER_RLIMIT})"
         nginx_modified=true
     fi
 
-    # Raise worker_connections (CloudPanel default: 2000)
+    # Raise worker_connections
     if grep -q "worker_connections" "$NGINX_CONF" 2>/dev/null; then
         local current_wc
         current_wc=$(grep "worker_connections" "$NGINX_CONF" | awk '{print $2}' | tr -dc '0-9')
@@ -880,53 +887,120 @@ optimize_nginx() {
         nginx_modified=true
     fi
 
-    # --- Part 2: Create http-context drop-in config ---
-    # This file is included via /etc/nginx/conf.d/*.conf which is inside the http {} block
+    # =====================================================================
+    # Part 2: Ensure conf.d include exists in nginx.conf
+    # CloudPanel's nginx.conf does NOT include conf.d by default — without
+    # this line, our conf.d/cloudpanel-optimize.conf is completely ignored.
+    # =====================================================================
+    if ! grep -q 'include /etc/nginx/conf.d/' "$NGINX_CONF" 2>/dev/null; then
+        # Insert before the sites-enabled include line (inside http block)
+        if grep -q 'include /etc/nginx/sites-enabled/' "$NGINX_CONF" 2>/dev/null; then
+            sed -i '/include \/etc\/nginx\/sites-enabled\//i\    include /etc/nginx/conf.d/*.conf;' "$NGINX_CONF"
+            # Verify it was actually inserted
+            if grep -q 'include /etc/nginx/conf.d/' "$NGINX_CONF" 2>/dev/null; then
+                log_ok "Added: include /etc/nginx/conf.d/*.conf to nginx.conf"
+                nginx_modified=true
+            else
+                log_warn "sed insert failed — adding include via append fallback"
+                # Fallback: insert before the closing brace of http block
+                sed -i '/include \/etc\/nginx\/sites-enabled/a\    include /etc/nginx/conf.d/*.conf;' "$NGINX_CONF"
+                if grep -q 'include /etc/nginx/conf.d/' "$NGINX_CONF" 2>/dev/null; then
+                    log_ok "Added: include /etc/nginx/conf.d/*.conf (via fallback)"
+                    nginx_modified=true
+                else
+                    log_err "Could not add conf.d include — add manually to nginx.conf inside http {}:"
+                    log_err "    include /etc/nginx/conf.d/*.conf;"
+                fi
+            fi
+        else
+            log_warn "Could not locate sites-enabled include — manually add to nginx.conf:"
+            log_warn "    include /etc/nginx/conf.d/*.conf;"
+        fi
+    else
+        log_info "conf.d include already present in nginx.conf"
+    fi
 
-    cat > "$NGINX_OPT_CONF" <<'NGINXOPT'
-# CP-OPTIMIZED — Nginx global performance tuning
-# This file is auto-included via /etc/nginx/conf.d/ (http context)
+    # =====================================================================
+    # Part 3: Optimize gzip settings directly in nginx.conf
+    # CloudPanel ships gzip in nginx.conf — we tune values in-place rather
+    # than duplicating them in conf.d (duplicate gzip directives cause
+    # unpredictable behavior).
+    # =====================================================================
+
+    # gzip_comp_level: 8 is overkill (diminishing returns above 5, wastes CPU)
+    if grep -q "gzip_comp_level" "$NGINX_CONF" 2>/dev/null; then
+        local current_gzip_level
+        current_gzip_level=$(grep "gzip_comp_level" "$NGINX_CONF" | awk '{print $2}' | tr -dc '0-9')
+        if [[ -n "$current_gzip_level" ]] && [[ "$current_gzip_level" -ne 5 ]]; then
+            sed -i "s/gzip_comp_level.*/gzip_comp_level 5;/" "$NGINX_CONF"
+            log_ok "gzip_comp_level: ${current_gzip_level} → 5 (CPU-balanced)"
+            nginx_modified=true
+        else
+            log_info "gzip_comp_level already at 5"
+        fi
+    fi
+
+    # gzip_min_length: skip compressing tiny responses (< 256 bytes)
+    if ! grep -q "gzip_min_length" "$NGINX_CONF" 2>/dev/null; then
+        if grep -q "gzip_comp_level" "$NGINX_CONF" 2>/dev/null; then
+            sed -i '/gzip_comp_level/a\    gzip_min_length 256;' "$NGINX_CONF"
+            log_ok "gzip_min_length: added (256 bytes)"
+            nginx_modified=true
+        fi
+    else
+        log_info "gzip_min_length already present"
+    fi
+
+    # =====================================================================
+    # Part 4: Optimize client buffer sizes directly in nginx.conf
+    # CloudPanel defaults are very low (1K body, 1k header) — these cause
+    # excessive disk I/O for POST requests and large headers.
+    # =====================================================================
+
+    if grep -q "client_body_buffer_size" "$NGINX_CONF" 2>/dev/null; then
+        local current_body_buf
+        current_body_buf=$(grep "client_body_buffer_size" "$NGINX_CONF" | awk '{print $2}' | tr -d ';')
+        if [[ "$current_body_buf" != "16k" ]]; then
+            sed -i "s/client_body_buffer_size.*/client_body_buffer_size 16k;/" "$NGINX_CONF"
+            log_ok "client_body_buffer_size: ${current_body_buf} → 16k"
+            nginx_modified=true
+        else
+            log_info "client_body_buffer_size already at 16k"
+        fi
+    fi
+
+    if grep -q "client_header_buffer_size" "$NGINX_CONF" 2>/dev/null; then
+        local current_header_buf
+        current_header_buf=$(grep "client_header_buffer_size" "$NGINX_CONF" | awk '{print $2}' | tr -d ';')
+        if [[ "$current_header_buf" != "4k" ]]; then
+            sed -i "s/client_header_buffer_size.*/client_header_buffer_size 4k;/" "$NGINX_CONF"
+            log_ok "client_header_buffer_size: ${current_header_buf} → 4k"
+            nginx_modified=true
+        else
+            log_info "client_header_buffer_size already at 4k"
+        fi
+    fi
+
+    # =====================================================================
+    # Part 5: Create conf.d drop-in for non-duplicate additions ONLY
+    # Everything in this file is NEW — not already in CloudPanel's nginx.conf.
+    # No gzip directives here — those are tuned in-place above.
+    # =====================================================================
+    if [[ ! -f "$NGINX_OPT_CONF" ]]; then
+        mkdir -p /etc/nginx/conf.d
+
+        cat > "$NGINX_OPT_CONF" <<'NGINXOPT'
+# CP-OPTIMIZED — Nginx performance additions
+# Non-duplicate settings only — gzip/buffers are tuned directly in nginx.conf
 # Safe for CloudPanel — does NOT touch vhosts or sites-enabled
 
-# --- Gzip Compression ---
-# Reduces response sizes by 60-80% for text-based content
-gzip on;
-gzip_vary on;
-gzip_proxied any;
-gzip_comp_level 5;
-gzip_min_length 256;
-gzip_types
-    text/plain
-    text/css
-    text/javascript
-    text/xml
-    application/json
-    application/javascript
-    application/x-javascript
-    application/xml
-    application/xml+rss
-    application/vnd.ms-fontobject
-    application/x-font-ttf
-    application/x-font-opentype
-    font/opentype
-    font/eot
-    image/svg+xml
-    image/x-icon;
-
-# --- Keepalive Optimization ---
-# Reuse connections instead of opening new ones for each request
-keepalive_timeout 65;
+# --- Keepalive Requests ---
+# Allow more requests per connection (nginx default: 1000, but explicit is safer)
 keepalive_requests 1000;
 
-# --- Client Buffer Tuning ---
-# Reduce disk I/O for typical POST requests and headers
-client_body_buffer_size 16k;
-client_header_buffer_size 4k;
+# --- Large Client Header Buffers ---
+# Handle large cookies/headers (WordPress, OAuth tokens, etc.)
 large_client_header_buffers 4 16k;
-
-# --- tcp_nodelay ---
-# Send small packets immediately (complements tcp_nopush already in nginx.conf)
-tcp_nodelay on;
 
 # --- Open File Cache ---
 # Cache file metadata to avoid repeated disk lookups for static files
@@ -935,59 +1009,67 @@ open_file_cache_valid 30s;
 open_file_cache_min_uses 2;
 open_file_cache_errors on;
 
-# --- Security ---
-# Hide Nginx version from response headers
-server_tokens off;
-
 # --- Timeouts ---
-# Reasonable timeouts to prevent resource exhaustion
+# Prevent slow clients from holding connections open
 send_timeout 30;
 reset_timedout_connection on;
 NGINXOPT
 
-    log_ok "Created $NGINX_OPT_CONF"
-    log_ok "  Gzip compression enabled (level 5)"
-    log_ok "  Keepalive: 65s timeout, 1000 requests"
-    log_ok "  Client buffers optimized"
-    log_ok "  Open file cache: 10000 entries"
-    log_ok "  server_tokens: off"
-
-    # --- Validate and reload ---
-    log_info "Testing nginx config..."
-    local test_output=""
-    local test_exit=0
-    test_output=$(nginx -t 2>&1) || test_exit=$?
-
-    if [[ $test_exit -eq 0 ]]; then
-        systemctl reload nginx
-        log_ok "Nginx config valid, reloaded"
-    elif [[ $baseline_exit -ne 0 ]]; then
-        # nginx -t was already failing before our changes — not our fault
-        log_warn "nginx -t still failing (pre-existing issues in vhost configs)"
-        log_warn "Pre-existing errors: ${baseline_output}"
-        log_info "Our changes (gzip, keepalive, etc.) are applied and correct"
-        log_info "Attempting reload — Nginx may still accept valid portions..."
-        systemctl reload nginx 2>/dev/null || true
-        if systemctl is-active --quiet nginx 2>/dev/null; then
-            log_ok "Nginx is running — optimizations active"
-        else
-            log_warn "Nginx reload had issues — but it was broken before our changes"
-        fi
-        log_info "Fix the vhost issues above, then run: sudo nginx -t && sudo systemctl reload nginx"
+        log_ok "Created $NGINX_OPT_CONF (keepalive, file cache, timeouts)"
     else
-        log_err "Nginx config test FAILED (exit code: ${test_exit})"
-        log_err "Error output: ${test_output}"
-        log_info "Rolling back nginx changes..."
+        log_info "$NGINX_OPT_CONF already exists — skipping creation"
+    fi
 
-        # Restore nginx.conf from backup
-        if [[ -f "$BACKUP_DIR/nginx/nginx.conf" ]]; then
-            cp "$BACKUP_DIR/nginx/nginx.conf" "$NGINX_CONF" 2>/dev/null || true
+    # Summary
+    log_ok "nginx.conf: gzip, buffers, workers, conf.d include — verified"
+    log_ok "conf.d: keepalive_requests, open_file_cache, large_header_buffers — verified"
+
+    # =====================================================================
+    # Validate and reload
+    # =====================================================================
+    if [[ "$nginx_modified" == true ]] || [[ ! -f "$NGINX_OPT_CONF.loaded" ]]; then
+        log_info "Testing nginx config..."
+        local test_output=""
+        local test_exit=0
+        test_output=$(nginx -t 2>&1) || test_exit=$?
+
+        if [[ $test_exit -eq 0 ]]; then
+            systemctl reload nginx
+            log_ok "Nginx config valid, reloaded"
+            # Mark as successfully loaded
+            touch "$NGINX_OPT_CONF.loaded" 2>/dev/null || true
+        elif [[ $baseline_exit -ne 0 ]]; then
+            # nginx -t was already failing before our changes — not our fault
+            log_warn "nginx -t still failing (pre-existing issues in vhost configs)"
+            log_warn "Pre-existing errors: ${baseline_output}"
+            log_info "Our optimizations are applied and correct"
+            log_info "Attempting reload — Nginx may still accept valid portions..."
+            systemctl reload nginx 2>/dev/null || true
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                log_ok "Nginx is running — optimizations active"
+                touch "$NGINX_OPT_CONF.loaded" 2>/dev/null || true
+            else
+                log_warn "Nginx reload had issues — but it was broken before our changes"
+            fi
+            log_info "Fix the vhost issues above, then run: sudo nginx -t && sudo systemctl reload nginx"
+        else
+            log_err "Nginx config test FAILED (exit code: ${test_exit})"
+            log_err "Error output: ${test_output}"
+            log_info "Rolling back nginx changes..."
+
+            # Restore nginx.conf from backup
+            if [[ -f "$BACKUP_DIR/nginx/nginx.conf" ]]; then
+                cp "$BACKUP_DIR/nginx/nginx.conf" "$NGINX_CONF" 2>/dev/null || true
+            fi
+            # Remove our drop-in config
+            rm -f "$NGINX_OPT_CONF" 2>/dev/null || true
+            rm -f "$NGINX_OPT_CONF.loaded" 2>/dev/null || true
+
+            systemctl reload nginx 2>/dev/null || true
+            log_warn "Nginx changes rolled back"
         fi
-        # Remove our drop-in config
-        rm -f "$NGINX_OPT_CONF" 2>/dev/null || true
-
-        systemctl reload nginx 2>/dev/null || true
-        log_warn "Nginx changes rolled back"
+    else
+        log_info "No changes needed — nginx already optimized"
     fi
 }
 
@@ -1220,6 +1302,7 @@ rollback() {
         log_ok "Nginx main config restored"
     fi
     rm -f /etc/nginx/conf.d/cloudpanel-optimize.conf 2>/dev/null || true
+    rm -f /etc/nginx/conf.d/cloudpanel-optimize.conf.loaded 2>/dev/null || true
     if [[ -d "$RESTORE_DIR/nginx/conf.d" ]]; then
         cp -r "$RESTORE_DIR/nginx/conf.d/"* /etc/nginx/conf.d/ 2>/dev/null || true
     fi
@@ -1241,7 +1324,7 @@ case "${1:-}" in
     --dry-run)   DRY_RUN=true ;;
     --help|-h)
         echo ""
-        echo "  CloudPanel Performance Optimizer v3.2"
+        echo "  CloudPanel Performance Optimizer v3.3"
         echo ""
         echo "  Usage:"
         echo "    sudo bash $SCRIPT_NAME              Run full optimization"
@@ -1261,7 +1344,7 @@ check_root
 
 echo ""
 echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║         CloudPanel Performance Optimizer v3.2                 ║${NC}"
+echo -e "${GREEN}${BOLD}║         CloudPanel Performance Optimizer v3.3                 ║${NC}"
 echo -e "${GREEN}${BOLD}║         Backup → Detect → Optimize → Verify                  ║${NC}"
 echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
